@@ -32,6 +32,13 @@ jobs:
           pip install buildozer cython==0.29.36
 
       - name: Build APK with Buildozer
+        env:
+          # Android k C library ma 'grp' module k kuch functions
+          # (setgrent/getgrent/endgrent) properly declared nahi hain, jis
+          # waja sy naya compiler isay hard error treat kr leta hai. Ye
+          # feature Android pr istemal hi nahi hoti, is liye is specific
+          # warning ko error banany sy rok rahe hain.
+          CFLAGS: -Wno-error=implicit-function-declaration
         run: |
           yes | buildozer -v android debug
 
