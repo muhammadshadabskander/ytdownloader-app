@@ -1,17 +1,22 @@
 [app]
-title = YouTube Downloader
+title = Video Downloader
 package.name = ytdownloader
 package.domain = org.shadab.ytdownloader
 
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas
+# "ttf" added so the bundled Urdu font (assets/NotoNaskhArabicUI-Regular.ttf)
+# gets packaged into the APK.
+source.include_exts = py,png,jpg,kv,atlas,ttf
 
 version = 1.0
 
 # Python 3.11 explicitly pin ki hui hai, kyunky latest Python 3.14 Kivy
 # 2.3.0 k C-code k sath compatible nahi (compile errors deta hai).
 # Python 3.11 Kivy 2.3.0 k sath fully tested/compatible hai.
-requirements = python3==3.11.6,hostpython3==3.11.6,kivy==2.3.0,yt-dlp,certifi,requests,urllib3,charset_normalizer,idna,brotli,websockets,pyjnius
+#
+# arabic-reshaper + python-bidi added: these make Urdu text display
+# correctly (properly joined letters) inside the app's bilingual UI.
+requirements = python3==3.11.6,hostpython3==3.11.6,kivy==2.3.0,yt-dlp,certifi,requests,urllib3,charset_normalizer,idna,brotli,websockets,pyjnius,arabic-reshaper,python-bidi
 
 orientation = portrait
 fullscreen = 0
