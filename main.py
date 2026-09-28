@@ -78,6 +78,12 @@ ACCENT = (0.91, 0.22, 0.25, 1)
 GREEN = (0.18, 0.68, 0.38, 1)
 RED = (0.90, 0.30, 0.30, 1)
 
+# Colour of the big "Add Download" button (change freely).
+ADD_BTN_COLOR = (0.56, 0.32, 0.96, 1)   # purple
+
+# Set to True if you want playlist downloads to be a Pro-only feature.
+PLAYLIST_REQUIRES_PRO = False
+
 PLATFORMS = [
     # key, label, color
     ("youtube", "YouTube", (0.86, 0.13, 0.13, 1)),
@@ -283,7 +289,7 @@ def get_download_folder():
 class DownloadRow(Card):
     """One card in the downloads list: badge, title, progress bar, status, cancel."""
 
-    def __init__(self, url, mode, platform, on_cancel, **kwargs):
+    def __init__(self, url, mode, platform, on_cancel, playlist=False, **kwargs):
         super().__init__(orientation="vertical", size_hint_y=None, height=dp(108),
                          padding=(dp(12), dp(8)), spacing=dp(6), **kwargs)
 
@@ -297,8 +303,10 @@ class DownloadRow(Card):
         badge.add_widget(Label(text=f"{badge_text}", font_size=sp(11), bold=True, color=TEXT))
         top_row.add_widget(badge)
 
-        mode_lbl = Label(text="AUDIO" if mode == "audio" else "VIDEO",
-                         font_size=sp(10), color=MUTED, size_hint=(None, 1), width=dp(44))
+        kind = "AUDIO" if mode == "audio" else "VIDEO"
+        mode_lbl = Label(text=f"PLAYLIST\n{kind}" if playlist else kind,
+                         font_size=sp(9), color=MUTED, size_hint=(None, 1), width=dp(54),
+                         halign="center")
         top_row.add_widget(mode_lbl)
 
         self.title_label = Label(
@@ -364,6 +372,7 @@ class YTDownloaderApp(App):
         self.active_download_count = 0
         self.selected_platform = "youtube"
         self.selected_mode = "video"
+        self.selected_scope = "single"   # "single" or "playlist"
 
         self.device_id = get_device_id(self.user_data_dir)
         self.is_pro = load_pro_status(self.user_data_dir)
@@ -391,31 +400,34 @@ class YTDownloaderApp(App):
         # ---- Input card ----
         input_card = Card(orientation="vertical", size_hint=(1, None),
                           padding=dp(12), spacing=dp(8))
-        input_card.height = dp(18 + 42 + 46 + 42 + 50 + 32 + 24)
+        # label 18 + platforms 86 + url 46 + options 42 + add 50 + 4 gaps + padding
+        input_card.height = dp(18 + 86 + 46 + 42 + 50 + 32 + 24)
 
-        input_card.add_widget(Label(
+        plat_lbl = Label(
             text="Select platform", font_size=sp(12), color=MUTED,
             size_hint=(1, None), height=dp(18), halign="left", valign="middle",
-        ))
-        input_card.children[0].bind(size=lambda i, s: setattr(i, "text_size", s))
+        )
+        plat_lbl.bind(size=lambda i, s: setattr(i, "text_size", s))
+        input_card.add_widget(plat_lbl)
 
-        # Horizontally scrollable platform chips (5 platforms don't fit on a phone)
-        p_scroll = ScrollView(size_hint=(1, None), height=dp(42),
-                              do_scroll_y=False, bar_width=0)
-        p_row = BoxLayout(orientation="horizontal", size_hint=(None, 1), spacing=dp(6))
-        p_row.bind(minimum_width=p_row.setter("width"))
+        # Platform buttons: two rows so ALL platforms are visible (no side scrolling)
+        p_box = BoxLayout(orientation="vertical", size_hint=(1, None),
+                          height=dp(86), spacing=dp(6))
+        row1 = BoxLayout(orientation="horizontal", spacing=dp(6))
+        row2 = BoxLayout(orientation="horizontal", spacing=dp(6))
         self.platform_buttons = {}
-        for key, label, color in PLATFORMS:
+        for i, (key, label, color) in enumerate(PLATFORMS):
             btn = RoundedToggle(
                 text=label, group="platform", font_size=sp(13), bold=True,
-                size_hint=(None, 1), width=dp(104), active_color=color,
+                active_color=color,
                 state="down" if key == "youtube" else "normal",
             )
             btn.bind(on_press=lambda inst, k=key: self.select_platform(k))
             self.platform_buttons[key] = btn
-            p_row.add_widget(btn)
-        p_scroll.add_widget(p_row)
-        input_card.add_widget(p_scroll)
+            (row1 if i < 3 else row2).add_widget(btn)
+        p_box.add_widget(row1)
+        p_box.add_widget(row2)
+        input_card.add_widget(p_box)
 
         # URL row: input + Paste
         url_row = BoxLayout(orientation="horizontal", size_hint=(1, None),
@@ -429,26 +441,33 @@ class YTDownloaderApp(App):
         url_row.add_widget(paste_btn)
         input_card.add_widget(url_row)
 
-        # Mode selector
-        mode_row = BoxLayout(orientation="horizontal", size_hint=(1, None),
-                             height=dp(42), spacing=dp(6))
+        # Options row: [Video | Audio]   [Single | Playlist]
+        opt_row = BoxLayout(orientation="horizontal", size_hint=(1, None),
+                            height=dp(42), spacing=dp(6))
+        blue = (0.30, 0.35, 0.85, 1)
+        teal = (0.10, 0.62, 0.66, 1)
         self.video_mode_btn = RoundedToggle(
-            text="Video", font_size=sp(13), group="mode", state="down",
-            active_color=(0.30, 0.35, 0.85, 1),
-        )
+            text="Video", font_size=sp(12), group="mode", state="down", active_color=blue)
         self.video_mode_btn.bind(on_press=lambda inst: self.select_mode("video"))
-        mode_row.add_widget(self.video_mode_btn)
         self.audio_mode_btn = RoundedToggle(
-            text="Audio Only", font_size=sp(13), group="mode",
-            active_color=(0.30, 0.35, 0.85, 1),
-        )
+            text="Audio", font_size=sp(12), group="mode", active_color=blue)
         self.audio_mode_btn.bind(on_press=lambda inst: self.select_mode("audio"))
-        mode_row.add_widget(self.audio_mode_btn)
-        input_card.add_widget(mode_row)
+        self.single_btn = RoundedToggle(
+            text="Single", font_size=sp(12), group="scope", state="down", active_color=teal)
+        self.single_btn.bind(on_press=lambda inst: self.select_scope("single"))
+        self.playlist_btn = RoundedToggle(
+            text="Playlist", font_size=sp(12), group="scope", active_color=teal)
+        self.playlist_btn.bind(on_press=lambda inst: self.select_scope("playlist"))
+        opt_row.add_widget(self.video_mode_btn)
+        opt_row.add_widget(self.audio_mode_btn)
+        opt_row.add_widget(Label(size_hint=(None, 1), width=dp(4)))  # small spacer
+        opt_row.add_widget(self.single_btn)
+        opt_row.add_widget(self.playlist_btn)
+        input_card.add_widget(opt_row)
 
         self.add_btn = RoundedButton(
             text="Add Download", font_size=sp(16), bold=True,
-            size_hint=(1, None), height=dp(50), bg_color=ACCENT,
+            size_hint=(1, None), height=dp(50), bg_color=ADD_BTN_COLOR,
         )
         self.add_btn.bind(on_press=self.add_download)
         input_card.add_widget(self.add_btn)
@@ -512,11 +531,18 @@ class YTDownloaderApp(App):
     def select_mode(self, mode):
         self.selected_mode = mode
 
+    def select_scope(self, scope):
+        self.selected_scope = scope
+
     def on_url_text(self, instance, text):
         key = detect_platform(text)
         if key and key != self.selected_platform:
             self.platform_buttons[key].state = "down"
             self.select_platform(key)
+        # A pure playlist link -> switch to Playlist automatically
+        if "/playlist?" in text.lower() and self.selected_scope != "playlist":
+            self.playlist_btn.state = "down"
+            self.select_scope("playlist")
 
     def paste_from_clipboard(self, instance):
         try:
@@ -544,6 +570,14 @@ class YTDownloaderApp(App):
             )
             return
 
+        playlist = self.selected_scope == "playlist"
+        if playlist and PLAYLIST_REQUIRES_PRO and not self.is_pro:
+            self.open_pro_popup(
+                instance,
+                message="Playlist download is a Pro feature.\nUnlock Pro to download whole playlists.",
+            )
+            return
+
         self.url_input.text = ""
         mode = self.selected_mode
         platform = detect_platform(url) or self.selected_platform
@@ -552,7 +586,7 @@ class YTDownloaderApp(App):
             self.downloads_grid.remove_widget(self.empty_label)
 
         download_id = str(uuid.uuid4())
-        row = DownloadRow(url=url, mode=mode, platform=platform,
+        row = DownloadRow(url=url, mode=mode, platform=platform, playlist=playlist,
                           on_cancel=lambda inst: self.cancel_download(download_id))
         self.downloads[download_id] = {
             "cancel_event": threading.Event(),
@@ -562,7 +596,8 @@ class YTDownloaderApp(App):
         self.active_download_count += 1
 
         thread = threading.Thread(
-            target=self.download_video, args=(url, download_id, mode, platform), daemon=True
+            target=self.download_video, args=(url, download_id, mode, platform, playlist),
+            daemon=True
         )
         thread.start()
 
@@ -581,18 +616,23 @@ class YTDownloaderApp(App):
         entry = self.downloads[download_id]
         row = entry["row"]
         cancel_event = entry["cancel_event"]
-        title_set = {"done": False}
+        state = {"last_key": None}
 
         def hook(d):
             if cancel_event.is_set():
                 raise DownloadCancelledError("Cancelled by user")
 
-            if not title_set["done"]:
-                info = d.get("info_dict") or {}
-                title = info.get("title")
-                if title:
-                    title_set["done"] = True
-                    Clock.schedule_once(lambda dt: row.set_title(title))
+            info = d.get("info_dict") or {}
+            idx = info.get("playlist_index")
+            total_items = info.get("n_entries") or info.get("playlist_count")
+            prefix = f"[{idx}/{total_items}] " if idx and total_items else ""
+
+            # Update the row title whenever a new item starts
+            key = (idx, info.get("title"))
+            if info.get("title") and key != state["last_key"]:
+                state["last_key"] = key
+                title = f"{prefix}{info['title']}"
+                Clock.schedule_once(lambda dt: row.set_title(title))
 
             if d["status"] == "downloading":
                 total = d.get("total_bytes") or d.get("total_bytes_estimate")
@@ -601,14 +641,14 @@ class YTDownloaderApp(App):
                     percent = downloaded / total * 100
                     Clock.schedule_once(lambda dt: row.set_progress(percent))
                     Clock.schedule_once(
-                        lambda dt: row.set_status(f"Downloading... {percent:.1f}%")
+                        lambda dt: row.set_status(f"{prefix}Downloading... {percent:.1f}%")
                     )
             elif d["status"] == "finished":
-                Clock.schedule_once(lambda dt: row.set_status("Processing..."))
+                Clock.schedule_once(lambda dt: row.set_status(f"{prefix}Processing..."))
 
         return hook
 
-    def download_video(self, url, download_id, mode, platform="youtube"):
+    def download_video(self, url, download_id, mode, platform="youtube", playlist=False):
         import yt_dlp
 
         entry = self.downloads[download_id]
@@ -630,17 +670,34 @@ class YTDownloaderApp(App):
             def error(self, msg):
                 pass
 
+        def cancel_filter(info, *, incomplete=False):
+            # Used in playlist mode: skips (and stops) remaining items after Cancel.
+            return "Cancelled" if cancel_event.is_set() else None
+
         def make_opts(fmt, player_client):
+            if playlist:
+                outtmpl = os.path.join(
+                    self.download_folder,
+                    "%(playlist_title|Playlist).100B",
+                    "%(playlist_index&{} - |)s%(title).120B.%(ext)s",
+                )
+            else:
+                outtmpl = os.path.join(self.download_folder, "%(title).150B.%(ext)s")
             opts = {
-                "outtmpl": os.path.join(self.download_folder, "%(title).150B.%(ext)s"),
+                "outtmpl": outtmpl,
                 "format": fmt,
                 "progress_hooks": [progress_hook],
-                "noplaylist": True,
+                "noplaylist": not playlist,
                 "quiet": True,
                 "no_warnings": True,
                 "noprogress": True,
                 "logger": SilentLogger(),
             }
+            if playlist:
+                # One unavailable/private video should not kill the whole playlist.
+                opts["ignoreerrors"] = True
+                opts["match_filter"] = cancel_filter
+                opts["break_on_reject"] = True
             if player_client:
                 # Only used for YouTube links.
                 opts["extractor_args"] = {"youtube": {"player_client": [player_client]}}
@@ -677,8 +734,11 @@ class YTDownloaderApp(App):
             try:
                 with yt_dlp.YoutubeDL(make_opts(fmt, player_client)) as ydl:
                     ydl.download([url])
+                if cancel_event.is_set():
+                    cancelled = True
+                    break
                 Clock.schedule_once(lambda dt: row.set_progress(100))
-                Clock.schedule_once(lambda dt: row.set_status("Done!", GREEN))
+                Clock.schedule_once(lambda dt: row.set_status("Done!" if not playlist else "Playlist finished!", GREEN))
                 Clock.schedule_once(lambda dt: row.mark_finished())
                 Clock.schedule_once(lambda dt: self._finish_download_slot())
                 return
@@ -687,6 +747,9 @@ class YTDownloaderApp(App):
                 break
             except yt_dlp.utils.DownloadError as e:
                 last_error = e
+                if cancel_event.is_set():
+                    cancelled = True
+                    break
                 err_text = str(e).lower()
                 if "requested format is not available" not in err_text and "sabr" not in err_text:
                     break
