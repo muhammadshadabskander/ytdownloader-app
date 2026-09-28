@@ -16,7 +16,7 @@ version = 1.0
 #
 # arabic-reshaper + python-bidi added: these make Urdu text display
 # correctly (properly joined letters) inside the app's bilingual UI.
-requirements = python3==3.11.6,hostpython3==3.11.6,kivy==2.3.0,yt-dlp,certifi,requests,urllib3,charset_normalizer,idna,brotli,websockets,pyjnius,arabic-reshaper,python-bidi
+requirements = python3==3.11.6,hostpython3==3.11.6,kivy==2.3.0,yt-dlp,certifi,requests,urllib3,charset_normalizer,idna,brotli,websockets,pyjnius,arabic-reshaper,python-bidi==0.4.2,six
 
 orientation = portrait
 fullscreen = 0
