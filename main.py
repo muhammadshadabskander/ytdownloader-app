@@ -50,7 +50,7 @@ except Exception:
 # ----------------------------------------------------------------------
 # Run `python generate_code.py setup` on YOUR computer once. It prints a
 # public key -> paste it here. (The PRIVATE key never goes into the app.)
-PUBLIC_KEY_HEX = "shadab-khan123456789"
+PUBLIC_KEY_HEX = "e0b1fe74117e1b95b608a4f221df314774b20ea66842350d515371c7c6966c6e"
 
 FREE_DOWNLOAD_LIMIT = 5        # successful downloads allowed in the free version
 PRO_PRICE = "Rs 500"           # shown to the customer in the unlock popup
