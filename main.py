@@ -8,9 +8,11 @@ changing/opening the save folder, and a Pro unlock (device-locked code).
 All on-screen text is English.
 """
 
+import base64
 import hashlib
-import hmac
+import json
 import os
+import urllib.request
 import subprocess
 import sys
 import threading
@@ -43,9 +45,22 @@ except Exception:
     ANDROID = False
 
 
-# !!! CHANGE THIS SECRET KEY AND NEVER SHARE IT WITH ANYONE !!!
-# This must be EXACTLY the same in generate_code.py.
-SECRET_KEY = b"shadab-khan1234567890"
+# ----------------------------------------------------------------------
+# Business settings
+# ----------------------------------------------------------------------
+# Run `python generate_code.py setup` on YOUR computer once. It prints a
+# public key -> paste it here. (The PRIVATE key never goes into the app.)
+PUBLIC_KEY_HEX = "shadab-khan123456789"
+
+FREE_DOWNLOAD_LIMIT = 5        # successful downloads allowed in the free version
+PRO_PRICE = "Rs 500"           # shown to the customer in the unlock popup
+
+# Optional: stops the free-download counter resetting when a customer clears
+# app data or reinstalls. Leave the placeholders to skip this (local-only
+# counting, same as before). See the setup steps you were given for how to
+# fill these in.
+FIREBASE_API_KEY = "AIzaSyCnC7QvuwUp5U4F4SDmOwepNsjbAE865uQ"
+FIREBASE_DB_URL = "https://video-downloader-47572-default-rtdb.firebaseio.com"
 
 # Payment / contact details shown in the Pro-unlock popup.
 PAYMENT_TITLE = "M Shadab Sikandar"
@@ -53,11 +68,120 @@ PAYMENT_EASYPAISA_NUMBER = "0311-8590702"
 CONTACT_WHATSAPP_NUMBER = "923118590702"  # country code + number, no leading 0, no symbols
 
 
-def generate_unlock_code(device_id):
-    """Device ID + SECRET_KEY -> a 10-character unlock code.
-    generate_code.py must use the exact same function/key to match."""
-    digest = hmac.new(SECRET_KEY, device_id.encode("utf-8"), hashlib.sha256).hexdigest()
-    return digest[:10].upper()
+# ---- Ed25519 signature check (pure Python, no extra libraries) ----
+_P = 2 ** 255 - 19
+_Q = 2 ** 252 + 27742317777372353535851937790883648493
+
+
+def _sha512(s):
+    return hashlib.sha512(s).digest()
+
+
+def _inv(x):
+    return pow(x, _P - 2, _P)
+
+
+_D = -121665 * _inv(121666) % _P
+_SQRT_M1 = pow(2, (_P - 1) // 4, _P)
+
+
+def _add(P, Q):
+    A = (P[1] - P[0]) * (Q[1] - Q[0]) % _P
+    B = (P[1] + P[0]) * (Q[1] + Q[0]) % _P
+    C = 2 * P[3] * Q[3] * _D % _P
+    D = 2 * P[2] * Q[2] % _P
+    E, F, G, H = B - A, D - C, D + C, B + A
+    return (E * F % _P, G * H % _P, F * G % _P, E * H % _P)
+
+
+def _mul(s, P):
+    Q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            Q = _add(Q, P)
+        P = _add(P, P)
+        s >>= 1
+    return Q
+
+
+def _equal(P, Q):
+    if (P[0] * Q[2] - Q[0] * P[2]) % _P != 0:
+        return False
+    if (P[1] * Q[2] - Q[1] * P[2]) % _P != 0:
+        return False
+    return True
+
+
+def _recover_x(y, sign):
+    if y >= _P:
+        return None
+    x2 = (y * y - 1) * _inv(_D * y * y + 1) % _P
+    if x2 == 0:
+        return None if sign else 0
+    x = pow(x2, (_P + 3) // 8, _P)
+    if (x * x - x2) % _P != 0:
+        x = x * _SQRT_M1 % _P
+    if (x * x - x2) % _P != 0:
+        return None
+    if (x & 1) != sign:
+        x = _P - x
+    return x
+
+
+_GY = 4 * _inv(5) % _P
+_GX = _recover_x(_GY, 0)
+_G = (_GX, _GY, 1, _GX * _GY % _P)
+
+
+def _decompress(s):
+    if len(s) != 32:
+        return None
+    y = int.from_bytes(s, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    x = _recover_x(y, sign)
+    if x is None:
+        return None
+    return (x, y, 1, x * y % _P)
+
+
+def _h_modq(s):
+    return int.from_bytes(_sha512(s), "little") % _Q
+
+
+def ed25519_verify(public, msg, signature):
+    try:
+        if len(public) != 32 or len(signature) != 64:
+            return False
+        A = _decompress(public)
+        if not A:
+            return False
+        Rs = signature[:32]
+        R = _decompress(Rs)
+        if not R:
+            return False
+        s = int.from_bytes(signature[32:], "little")
+        if s >= _Q:
+            return False
+        h = _h_modq(Rs + public + msg)
+        return _equal(_mul(s, _G), _add(R, _mul(h, A)))
+    except Exception:
+        return False
+
+
+def verify_unlock_code(device_id, code_text):
+    """True only if code_text is a valid signature (made with YOUR private key)
+    for exactly this device_id. A code for another phone will not pass."""
+    try:
+        public = bytes.fromhex(PUBLIC_KEY_HEX)
+    except ValueError:
+        return False
+    clean = "".join(ch for ch in (code_text or "").upper() if ch.isalnum())
+    try:
+        sig = base64.b32decode(clean + "=" * (-len(clean) % 8))
+    except Exception:
+        return False
+    return ed25519_verify(public, b"PRO1|" + device_id.encode("utf-8"), sig)
 
 
 class DownloadCancelledError(Exception):
@@ -81,8 +205,8 @@ RED = (0.90, 0.30, 0.30, 1)
 # Colour of the big "Add Download" button (change freely).
 ADD_BTN_COLOR = (0.56, 0.32, 0.96, 1)   # purple
 
-# Set to True if you want playlist downloads to be a Pro-only feature.
-PLAYLIST_REQUIRES_PRO = False
+# Playlists are Pro-only (otherwise one playlist would bypass the free limit).
+PLAYLIST_REQUIRES_PRO = True
 
 PLATFORMS = [
     # key, label, color
@@ -249,23 +373,118 @@ def get_device_id(user_data_dir):
     return new_id
 
 
-def load_pro_status(user_data_dir):
-    status_file = os.path.join(user_data_dir, "pro_status.txt")
+def load_pro_status(user_data_dir, device_id):
+    """Pro is active only if the saved code is a valid signature for THIS device."""
+    lic_file = os.path.join(user_data_dir, "license.txt")
     try:
-        with open(status_file, "r") as f:
-            return f.read().strip() == "unlocked"
+        with open(lic_file, "r") as f:
+            return verify_unlock_code(device_id, f.read())
     except Exception:
         return False
 
 
-def save_pro_status(user_data_dir):
-    status_file = os.path.join(user_data_dir, "pro_status.txt")
+def save_pro_license(user_data_dir, code):
+    lic_file = os.path.join(user_data_dir, "license.txt")
     try:
         os.makedirs(user_data_dir, exist_ok=True)
-        with open(status_file, "w") as f:
-            f.write("unlocked")
+        with open(lic_file, "w") as f:
+            f.write(code.strip())
     except Exception:
         pass
+
+
+def load_free_used(user_data_dir):
+    try:
+        with open(os.path.join(user_data_dir, "free_used.txt"), "r") as f:
+            return max(0, int(f.read().strip()))
+    except Exception:
+        return 0
+
+
+def save_free_used(user_data_dir, n):
+    try:
+        os.makedirs(user_data_dir, exist_ok=True)
+        with open(os.path.join(user_data_dir, "free_used.txt"), "w") as f:
+            f.write(str(int(n)))
+    except Exception:
+        pass
+
+
+# ----------------------------------------------------------------------
+# Firebase-backed download counter (optional).
+#
+# Keeps the free-download count tied to the Device ID on Firebase's
+# servers, not just in a local file, so clearing app data or reinstalling
+# the app does not refill the free quota. Only a full factory reset of the
+# phone (which usually changes the Device ID) gets around it.
+#
+# Uses the Realtime Database REST API directly with urllib, so no extra
+# Python packages are needed in buildozer.spec.
+# ----------------------------------------------------------------------
+def _firebase_configured():
+    return (
+        FIREBASE_API_KEY and not FIREBASE_API_KEY.startswith("PASTE")
+        and FIREBASE_DB_URL and not FIREBASE_DB_URL.startswith("https://PASTE")
+    )
+
+
+def _http_json(url, method="GET", payload=None, timeout=8):
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read()
+    return json.loads(body) if body else None
+
+
+def firebase_anon_token():
+    """Starts a fresh anonymous Firebase session. Returns an idToken, or None
+    if Firebase isn't configured or the device has no internet access."""
+    if not _firebase_configured():
+        return None
+    url = (
+        "https://identitytoolkit.googleapis.com/v1/accounts:signUp"
+        f"?key={FIREBASE_API_KEY}"
+    )
+    try:
+        result = _http_json(url, "POST", {"returnSecureToken": True})
+        return result.get("idToken") if result else None
+    except Exception:
+        return None
+
+
+def firebase_get_count(device_id):
+    """Returns the download count Firebase has stored for this device,
+    or None if it could not be reached (offline / not configured)."""
+    token = firebase_anon_token()
+    if not token:
+        return None
+    url = f"{FIREBASE_DB_URL}/downloads/{device_id}/count.json?auth={token}"
+    try:
+        result = _http_json(url, "GET")
+        return int(result) if isinstance(result, (int, float)) else 0
+    except Exception:
+        return None
+
+
+def firebase_increment_count(device_id):
+    """Reads the current remote count and writes count+1. Returns the new
+    count, or None if it could not be reached. The security rules only
+    allow writing exactly old_value + 1, so this can never be used to set
+    the counter back down, even by someone who extracts the API key."""
+    token = firebase_anon_token()
+    if not token:
+        return None
+    base = f"{FIREBASE_DB_URL}/downloads/{device_id}/count.json?auth={token}"
+    try:
+        current = _http_json(base, "GET")
+        current = int(current) if isinstance(current, (int, float)) else 0
+        new_value = current + 1
+        _http_json(base, "PUT", new_value)
+        return new_value
+    except Exception:
+        return None
 
 
 def get_download_folder():
@@ -375,19 +594,31 @@ class YTDownloaderApp(App):
         self.selected_scope = "single"   # "single" or "playlist"
 
         self.device_id = get_device_id(self.user_data_dir)
-        self.is_pro = load_pro_status(self.user_data_dir)
+        self.is_pro = load_pro_status(self.user_data_dir, self.device_id)
+        self.free_used = load_free_used(self.user_data_dir)
+        # Catches the case where the customer cleared app data / reinstalled:
+        # pulls the real count back down from Firebase once a connection exists.
+        threading.Thread(target=self._sync_startup_count, daemon=True).start()
 
         root = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(10))
 
         # ---- Header: title + Pro button ----
-        header = Card(orientation="horizontal", size_hint=(1, None), height=dp(58),
+        header = Card(orientation="horizontal", size_hint=(1, None), height=dp(64),
                       padding=(dp(14), dp(8)), spacing=dp(8))
+        title_box = BoxLayout(orientation="vertical")
         title_lbl = Label(
             text="Video Downloader", font_size=sp(19), bold=True, color=TEXT,
             halign="left", valign="middle",
         )
         title_lbl.bind(size=lambda i, s: setattr(i, "text_size", s))
-        header.add_widget(title_lbl)
+        title_box.add_widget(title_lbl)
+        self.quota_label = Label(
+            text="", font_size=sp(11), color=MUTED, halign="left", valign="middle",
+            size_hint=(1, None), height=dp(16),
+        )
+        self.quota_label.bind(size=lambda i, s: setattr(i, "text_size", s))
+        title_box.add_widget(self.quota_label)
+        header.add_widget(title_box)
         self.pro_btn = RoundedButton(
             text="PRO Unlocked" if self.is_pro else "Unlock Pro",
             font_size=sp(12), bold=True, size_hint=(None, 1), width=dp(112),
@@ -396,6 +627,7 @@ class YTDownloaderApp(App):
         self.pro_btn.bind(on_press=self.open_pro_popup)
         header.add_widget(self.pro_btn)
         root.add_widget(header)
+        self.refresh_quota_label()
 
         # ---- Input card ----
         input_card = Card(orientation="vertical", size_hint=(1, None),
@@ -519,6 +751,43 @@ class YTDownloaderApp(App):
     def _update_folder_label_text_size(self, instance, size):
         instance.text_size = (size[0], size[1])
 
+    def refresh_quota_label(self):
+        if self.is_pro:
+            self.quota_label.text = "Pro - unlimited downloads"
+            self.quota_label.color = (0.45, 0.85, 0.55, 1)
+        else:
+            left = max(0, FREE_DOWNLOAD_LIMIT - self.free_used)
+            self.quota_label.text = f"Free downloads left: {left} of {FREE_DOWNLOAD_LIMIT}"
+            self.quota_label.color = MUTED if left > 0 else RED
+
+    def _count_free_download(self):
+        """Called after a SUCCESSFUL download. Failed/cancelled ones don't count."""
+        if self.is_pro:
+            return
+        self.free_used += 1
+        save_free_used(self.user_data_dir, self.free_used)
+        self.refresh_quota_label()
+        threading.Thread(target=self._sync_increment_remote, daemon=True).start()
+
+    def _apply_remote_count(self, remote_count):
+        # Only ever move the number UP to the server's value - never down,
+        # so a flaky network reply can't quietly give free downloads back.
+        if remote_count is None or remote_count <= self.free_used:
+            return
+        self.free_used = remote_count
+        save_free_used(self.user_data_dir, self.free_used)
+        self.refresh_quota_label()
+
+    def _sync_startup_count(self):
+        remote = firebase_get_count(self.device_id)
+        if remote is not None:
+            Clock.schedule_once(lambda dt: self._apply_remote_count(remote))
+
+    def _sync_increment_remote(self):
+        remote = firebase_increment_count(self.device_id)
+        if remote is not None:
+            Clock.schedule_once(lambda dt: self._apply_remote_count(remote))
+
     # ------------------------------------------------------------------
     # Platform / mode selection. yt_dlp auto-detects the site from the URL,
     # so the platform chips mainly drive the hint text and the badge.
@@ -558,6 +827,16 @@ class YTDownloaderApp(App):
     def add_download(self, instance):
         url = self.url_input.text.strip()
         if not url:
+            return
+
+        if not self.is_pro and self.free_used >= FREE_DOWNLOAD_LIMIT:
+            self.open_pro_popup(
+                instance,
+                message=(
+                    f"Free limit reached ({FREE_DOWNLOAD_LIMIT} of {FREE_DOWNLOAD_LIMIT} downloads used).\n"
+                    f"Unlock Pro for unlimited downloads: {PRO_PRICE}, one-time."
+                ),
+            )
             return
 
         if not self.is_pro and self.active_download_count >= 1:
@@ -739,6 +1018,7 @@ class YTDownloaderApp(App):
                     break
                 Clock.schedule_once(lambda dt: row.set_progress(100))
                 Clock.schedule_once(lambda dt: row.set_status("Done!" if not playlist else "Playlist finished!", GREEN))
+                Clock.schedule_once(lambda dt: self._count_free_download())
                 Clock.schedule_once(lambda dt: row.mark_finished())
                 Clock.schedule_once(lambda dt: self._finish_download_slot())
                 return
@@ -811,7 +1091,14 @@ class YTDownloaderApp(App):
         if message:
             body.add_widget(wrap_label(message, 12, color=(0.95, 0.75, 0.30, 1)))
 
-        body.add_widget(wrap_label("Copy your Device ID below and send it when you pay:"))
+        body.add_widget(wrap_label(
+            f"Pro price: {PRO_PRICE} (one-time, works on this phone only)\n"
+            "1) Pay via EasyPaisa (details below)\n"
+            "2) Send your Device ID + payment proof on WhatsApp\n"
+            "3) Paste the unlock code you receive and tap Activate",
+            12, color=TEXT,
+        ))
+        body.add_widget(wrap_label("Your Device ID:"))
 
         id_row = BoxLayout(orientation="horizontal", size_hint=(1, None),
                            height=dp(44), spacing=dp(6))
@@ -835,9 +1122,17 @@ class YTDownloaderApp(App):
         whatsapp_btn.bind(on_press=self.open_whatsapp_contact)
         body.add_widget(whatsapp_btn)
 
-        body.add_widget(wrap_label("Enter the unlock code you receive after payment:"))
-        code_input = styled_input(hint_text="Unlock code", size_hint=(1, None), height=dp(46))
-        body.add_widget(code_input)
+        body.add_widget(wrap_label("Paste the unlock code you receive after payment:"))
+        code_row = BoxLayout(orientation="horizontal", size_hint=(1, None),
+                             height=dp(46), spacing=dp(6))
+        code_input = styled_input(hint_text="Unlock code", font_size=sp(11))
+        code_row.add_widget(code_input)
+        paste_code_btn = RoundedButton(text="Paste", font_size=sp(12),
+                                       size_hint=(None, 1), width=dp(64))
+        paste_code_btn.bind(
+            on_press=lambda *_a: setattr(code_input, "text", (Clipboard.paste() or "").strip()))
+        code_row.add_widget(paste_code_btn)
+        body.add_widget(code_row)
 
         result_label = wrap_label("", 12, color=RED)
         body.add_widget(result_label)
@@ -853,16 +1148,21 @@ class YTDownloaderApp(App):
         popup = make_popup("Unlock Pro", content, (0.94, 0.92))
 
         def try_activate(*_a):
-            entered = code_input.text.strip().upper()
-            expected = generate_unlock_code(self.device_id)
-            if entered and entered == expected:
+            entered = code_input.text.strip()
+            if not entered:
+                result_label.text = "Please paste your unlock code."
+                return
+            if verify_unlock_code(self.device_id, entered):
                 self.is_pro = True
-                save_pro_status(self.user_data_dir)
+                save_pro_license(self.user_data_dir, entered)
                 self.pro_btn.text = "PRO Unlocked"
                 self.pro_btn.bg_color = list(GREEN)
+                self.refresh_quota_label()
                 popup.dismiss()
+            elif PUBLIC_KEY_HEX.startswith("PASTE"):
+                result_label.text = "Developer: set PUBLIC_KEY_HEX in main.py first."
             else:
-                result_label.text = "Incorrect code. Please check again."
+                result_label.text = "Incorrect code for this device. Please check again."
 
         activate_btn.bind(on_press=try_activate)
         popup.open()
